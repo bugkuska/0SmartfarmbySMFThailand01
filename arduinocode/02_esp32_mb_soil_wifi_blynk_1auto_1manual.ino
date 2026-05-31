@@ -45,13 +45,13 @@ const int  blynk_port = 8080;
 // Blynk Virtual Pins
 // =========================
 // Valve1 / Soil Sensor
-#define VPIN_VALVE1      V2
-#define VPIN_SOIL1       V4
-#define VPIN_AUTO1       V5
-#define VPIN_THRESHOLD1  V6
+#define VPIN_VALVE1      V1
+#define VPIN_SOIL1       V2
+#define VPIN_AUTO1       V3
+#define VPIN_THRESHOLD1  V4
 
 // Valve2 Manual Only
-#define VPIN_VALVE2      V11
+#define VPIN_VALVE2      V5
 
 // =========================
 // Global Objects
