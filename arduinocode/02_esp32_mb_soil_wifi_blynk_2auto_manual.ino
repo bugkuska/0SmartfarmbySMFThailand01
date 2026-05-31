@@ -24,37 +24,34 @@ const int  blynk_port = 8080;
 // =========================
 // ESP32 Dev Module Pins
 // =========================
-#define RX2_PIN 16    // ESP32 RX2 รับข้อมูลจาก TTL485 TXD
-#define TX2_PIN 17    // ESP32 TX2 ส่งข้อมูลไป TTL485 RXD
+#define RX2_PIN 16
+#define TX2_PIN 17
 
-#define BLYNK_LED_PIN 2    // GPIO2 Active High แสดงสถานะ Blynk Connected
+#define BLYNK_LED_PIN 2    // Active High
 
 // =========================
 // Relay Module 2CH Active Low
 // =========================
-#define RELAY_CH1 18       // CH1 = Valve1
-#define RELAY_CH2 19       // CH2 = Valve2
+#define RELAY_CH1 18       // Valve1 Auto/Manual
+#define RELAY_CH2 19       // Valve2 Manual Only
 
-#define RELAY_ON  LOW      // Active Low Relay
+#define RELAY_ON  LOW
 #define RELAY_OFF HIGH
 
-#define LED_ON    HIGH     // GPIO2 Active High
+#define LED_ON    HIGH
 #define LED_OFF   LOW
 
 // =========================
 // Blynk Virtual Pins
 // =========================
-// Zone 1
+// Valve1 / Soil Sensor
 #define VPIN_VALVE1      V2
 #define VPIN_SOIL1       V4
 #define VPIN_AUTO1       V5
 #define VPIN_THRESHOLD1  V6
 
-// Zone 2
+// Valve2 Manual Only
 #define VPIN_VALVE2      V11
-#define VPIN_SOIL2       V12
-#define VPIN_AUTO2       V13
-#define VPIN_THRESHOLD2  V14
 
 // =========================
 // Global Objects
@@ -66,33 +63,23 @@ Preferences preferences;
 // =========================
 // Global Variables
 // =========================
-// Zone 1
 bool  isAutoMode1 = false;
 float soilThreshold1 = 50.0;
 float soilMoisture1 = 0.0;
-
-// Zone 2
-bool  isAutoMode2 = false;
-float soilThreshold2 = 50.0;
-float soilMoisture2 = 0.0;
 
 // =========================
 // Function Prototypes
 // =========================
 void connectWiFi();
 void checkConnections();
-void readAllSensors();
 
-void readZone1();
-void readZone2();
-
+void readSoilSensor();
 bool readSoilBySlave(uint8_t slaveId, float &value);
-void printModbusError(uint8_t errorCode);
 
-void controlZone1Auto();
-void controlZone2Auto();
-
+void controlValve1Auto();
 void syncAllToBlynk();
+
+void printModbusError(uint8_t errorCode);
 
 // =========================
 // Setup
@@ -104,23 +91,20 @@ void setup() {
   Serial.println();
   Serial.println("====================================");
   Serial.println("ESP32 Dev Module Smart Farm");
-  Serial.println("WiFi SSID/Password Mode");
-  Serial.println("Modbus Soil Moisture + Blynk Legacy");
-  Serial.println("Relay 2CH Active Low");
-  Serial.println("CH1 GPIO18 = Valve1");
-  Serial.println("CH2 GPIO19 = Valve2");
+  Serial.println("1 Soil Sensor + Relay 2CH Active Low");
+  Serial.println("CH1 GPIO18 = Valve1 Auto/Manual");
+  Serial.println("CH2 GPIO19 = Valve2 Manual Only");
   Serial.println("GPIO2 Active High = Blynk Indicator");
   Serial.println("====================================");
 
   // Serial2 for Modbus RTU
   Serial2.begin(9600, SERIAL_8N1, RX2_PIN, TX2_PIN);
 
-  // GPIO setup
   pinMode(BLYNK_LED_PIN, OUTPUT);
   pinMode(RELAY_CH1, OUTPUT);
   pinMode(RELAY_CH2, OUTPUT);
 
-  // ปิดอุปกรณ์ทั้งหมดตอนเริ่มต้น
+  // ปิดทั้งหมดตอนเริ่มต้น
   digitalWrite(BLYNK_LED_PIN, LED_OFF);
   digitalWrite(RELAY_CH1, RELAY_OFF);
   digitalWrite(RELAY_CH2, RELAY_OFF);
@@ -132,16 +116,9 @@ void setup() {
   soilThreshold1 = preferences.getFloat("th1", 50.0);
   soilMoisture1  = preferences.getFloat("soil1", 0.0);
 
-  isAutoMode2    = preferences.getBool("auto2", false);
-  soilThreshold2 = preferences.getFloat("th2", 50.0);
-  soilMoisture2  = preferences.getFloat("soil2", 0.0);
-
   Serial.println("=== Loaded Preferences ===");
-  Serial.printf("Zone1 -> Auto:%d Threshold:%.1f Soil:%.1f\n",
+  Serial.printf("Valve1 -> Auto:%d Threshold:%.1f Soil:%.1f\n",
                 isAutoMode1, soilThreshold1, soilMoisture1);
-
-  Serial.printf("Zone2 -> Auto:%d Threshold:%.1f Soil:%.1f\n",
-                isAutoMode2, soilThreshold2, soilMoisture2);
 
   // Connect WiFi
   connectWiFi();
@@ -162,15 +139,14 @@ void setup() {
     Serial.println("Blynk not connected.");
   }
 
-  // ตั้งค่า Modbus เริ่มต้น
+  // Modbus Soil Sensor Slave ID 1
   node.begin(1, Serial2);
 
-  // Timers
   timer.setInterval(10000L, checkConnections);
-  timer.setInterval(15000L, readAllSensors);
+  timer.setInterval(15000L, readSoilSensor);
 
   // อ่านค่าเร็วหลังบูต
-  timer.setTimeout(3000L, readAllSensors);
+  timer.setTimeout(3000L, readSoilSensor);
 }
 
 // =========================
@@ -210,21 +186,21 @@ BLYNK_CONNECTED() {
 
   digitalWrite(BLYNK_LED_PIN, LED_ON);
 
+  // Sync Valve1 Auto/Threshold
   Blynk.syncVirtual(VPIN_AUTO1, VPIN_THRESHOLD1);
-  Blynk.syncVirtual(VPIN_AUTO2, VPIN_THRESHOLD2);
 
+  // ถ้า Valve1 ไม่ได้อยู่ Auto ให้ Sync ปุ่ม Manual
   if (!isAutoMode1) {
     Blynk.syncVirtual(VPIN_VALVE1);
   }
 
-  if (!isAutoMode2) {
-    Blynk.syncVirtual(VPIN_VALVE2);
-  }
+  // Valve2 เป็น Manual อย่างเดียว
+  Blynk.syncVirtual(VPIN_VALVE2);
 
   syncAllToBlynk();
 
-  // อ่าน sensor ใหม่และคุมทันทีหลัง Blynk Connect
-  readAllSensors();
+  // อ่าน sensor ใหม่ทันทีหลัง Blynk Connect
+  readSoilSensor();
 }
 
 // =========================
@@ -234,11 +210,8 @@ void syncAllToBlynk() {
   Blynk.virtualWrite(VPIN_AUTO1, isAutoMode1);
   Blynk.virtualWrite(VPIN_THRESHOLD1, soilThreshold1);
   Blynk.virtualWrite(VPIN_SOIL1, soilMoisture1);
-  Blynk.virtualWrite(VPIN_VALVE1, digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0);
 
-  Blynk.virtualWrite(VPIN_AUTO2, isAutoMode2);
-  Blynk.virtualWrite(VPIN_THRESHOLD2, soilThreshold2);
-  Blynk.virtualWrite(VPIN_SOIL2, soilMoisture2);
+  Blynk.virtualWrite(VPIN_VALVE1, digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0);
   Blynk.virtualWrite(VPIN_VALVE2, digitalRead(RELAY_CH2) == RELAY_ON ? 1 : 0);
 }
 
@@ -291,7 +264,7 @@ void checkConnections() {
 }
 
 // =========================
-// Manual Controls
+// Valve1 Manual Control
 // =========================
 BLYNK_WRITE(VPIN_VALVE1) {
   if (!isAutoMode1) {
@@ -302,40 +275,39 @@ BLYNK_WRITE(VPIN_VALVE1) {
     Serial.print("Valve1 Manual = ");
     Serial.println(state ? "ON" : "OFF");
   } else {
-    Serial.println("Zone1 is in AUTO mode, manual command ignored.");
+    Serial.println("Valve1 is in AUTO mode, manual command ignored.");
     Blynk.virtualWrite(VPIN_VALVE1, digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0);
   }
 }
 
+// =========================
+// Valve2 Manual Only
+// =========================
 BLYNK_WRITE(VPIN_VALVE2) {
-  if (!isAutoMode2) {
-    int state = param.asInt();
+  int state = param.asInt();
 
-    digitalWrite(RELAY_CH2, state ? RELAY_ON : RELAY_OFF);
+  digitalWrite(RELAY_CH2, state ? RELAY_ON : RELAY_OFF);
 
-    Serial.print("Valve2 Manual = ");
-    Serial.println(state ? "ON" : "OFF");
-  } else {
-    Serial.println("Zone2 is in AUTO mode, manual command ignored.");
-    Blynk.virtualWrite(VPIN_VALVE2, digitalRead(RELAY_CH2) == RELAY_ON ? 1 : 0);
-  }
+  Serial.print("Valve2 Manual Only = ");
+  Serial.println(state ? "ON" : "OFF");
 }
 
 // =========================
-// Zone 1 Auto Mode
+// Valve1 Auto Mode
 // =========================
 BLYNK_WRITE(VPIN_AUTO1) {
   isAutoMode1 = param.asInt();
   preferences.putBool("auto1", isAutoMode1);
 
-  Serial.print("Zone1 Mode = ");
+  Serial.print("Valve1 Mode = ");
   Serial.println(isAutoMode1 ? "Auto" : "Manual");
 
   if (!isAutoMode1) {
+    // ออกจาก Auto แล้วปิด Valve1 ก่อน เพื่อความปลอดภัย
     digitalWrite(RELAY_CH1, RELAY_OFF);
     Blynk.virtualWrite(VPIN_VALVE1, 0);
   } else {
-    controlZone1Auto();
+    controlValve1Auto();
   }
 }
 
@@ -343,58 +315,39 @@ BLYNK_WRITE(VPIN_THRESHOLD1) {
   soilThreshold1 = param.asFloat();
   preferences.putFloat("th1", soilThreshold1);
 
-  Serial.print("Zone1 Threshold = ");
+  Serial.print("Valve1 Soil Threshold = ");
   Serial.println(soilThreshold1);
 
   if (isAutoMode1) {
-    controlZone1Auto();
+    controlValve1Auto();
   }
 }
 
 // =========================
-// Zone 2 Auto Mode
+// Read Soil Sensor
 // =========================
-BLYNK_WRITE(VPIN_AUTO2) {
-  isAutoMode2 = param.asInt();
-  preferences.putBool("auto2", isAutoMode2);
-
-  Serial.print("Zone2 Mode = ");
-  Serial.println(isAutoMode2 ? "Auto" : "Manual");
-
-  if (!isAutoMode2) {
-    digitalWrite(RELAY_CH2, RELAY_OFF);
-    Blynk.virtualWrite(VPIN_VALVE2, 0);
-  } else {
-    controlZone2Auto();
-  }
-}
-
-BLYNK_WRITE(VPIN_THRESHOLD2) {
-  soilThreshold2 = param.asFloat();
-  preferences.putFloat("th2", soilThreshold2);
-
-  Serial.print("Zone2 Threshold = ");
-  Serial.println(soilThreshold2);
-
-  if (isAutoMode2) {
-    controlZone2Auto();
-  }
-}
-
-// =========================
-// Read All Sensors
-// =========================
-void readAllSensors() {
+void readSoilSensor() {
   Serial.println();
-  Serial.println("=== Reading All Soil Sensors ===");
+  Serial.println("=== Reading Soil Moisture Sensor ===");
 
-  readZone1();
-  delay(300);
+  float newValue = 0.0;
 
-  readZone2();
-  delay(300);
+  if (readSoilBySlave(1, newValue)) {
+    soilMoisture1 = newValue;
+    preferences.putFloat("soil1", soilMoisture1);
 
-  Serial.println("================================");
+    Blynk.virtualWrite(VPIN_SOIL1, soilMoisture1);
+
+    Serial.print("Soil Moisture = ");
+    Serial.print(soilMoisture1, 1);
+    Serial.println(" %");
+
+    controlValve1Auto();
+  } else {
+    Serial.println("Soil Sensor read failed!");
+  }
+
+  Serial.println("====================================");
 }
 
 // =========================
@@ -427,9 +380,7 @@ bool readSoilBySlave(uint8_t slaveId, float &value) {
     Serial.print(" Register 2 Raw Soil = ");
     Serial.println(reg2);
 
-    Serial.print("Slave ID ");
-    Serial.print(slaveId);
-    Serial.print(" Soil Moisture = ");
+    Serial.print("Parsed Soil Moisture = ");
     Serial.print(tempValue, 1);
     Serial.println(" %");
 
@@ -452,29 +403,11 @@ bool readSoilBySlave(uint8_t slaveId, float &value) {
 }
 
 // =========================
-// Zone 1
+// Valve1 Auto Control
 // =========================
-void readZone1() {
-  float newValue = 0.0;
-
-  if (readSoilBySlave(1, newValue)) {
-    soilMoisture1 = newValue;
-    preferences.putFloat("soil1", soilMoisture1);
-
-    Blynk.virtualWrite(VPIN_SOIL1, soilMoisture1);
-
-    Serial.print("Zone1 Soil Moisture = ");
-    Serial.println(soilMoisture1);
-
-    controlZone1Auto();
-  } else {
-    Serial.println("Zone1 read failed!");
-  }
-}
-
-void controlZone1Auto() {
+void controlValve1Auto() {
   if (isAutoMode1) {
-    Serial.print("Zone1 AUTO Check -> Soil = ");
+    Serial.print("Valve1 AUTO Check -> Soil = ");
     Serial.print(soilMoisture1);
     Serial.print(" Threshold = ");
     Serial.println(soilThreshold1);
@@ -482,51 +415,11 @@ void controlZone1Auto() {
     if (soilMoisture1 < soilThreshold1) {
       digitalWrite(RELAY_CH1, RELAY_ON);
       Blynk.virtualWrite(VPIN_VALVE1, 1);
-      Serial.println("Zone1 AUTO -> Valve1 ON");
+      Serial.println("Valve1 AUTO -> ON");
     } else {
       digitalWrite(RELAY_CH1, RELAY_OFF);
       Blynk.virtualWrite(VPIN_VALVE1, 0);
-      Serial.println("Zone1 AUTO -> Valve1 OFF");
-    }
-  }
-}
-
-// =========================
-// Zone 2
-// =========================
-void readZone2() {
-  float newValue = 0.0;
-
-  if (readSoilBySlave(2, newValue)) {
-    soilMoisture2 = newValue;
-    preferences.putFloat("soil2", soilMoisture2);
-
-    Blynk.virtualWrite(VPIN_SOIL2, soilMoisture2);
-
-    Serial.print("Zone2 Soil Moisture = ");
-    Serial.println(soilMoisture2);
-
-    controlZone2Auto();
-  } else {
-    Serial.println("Zone2 read failed!");
-  }
-}
-
-void controlZone2Auto() {
-  if (isAutoMode2) {
-    Serial.print("Zone2 AUTO Check -> Soil = ");
-    Serial.print(soilMoisture2);
-    Serial.print(" Threshold = ");
-    Serial.println(soilThreshold2);
-
-    if (soilMoisture2 < soilThreshold2) {
-      digitalWrite(RELAY_CH2, RELAY_ON);
-      Blynk.virtualWrite(VPIN_VALVE2, 1);
-      Serial.println("Zone2 AUTO -> Valve2 ON");
-    } else {
-      digitalWrite(RELAY_CH2, RELAY_OFF);
-      Blynk.virtualWrite(VPIN_VALVE2, 0);
-      Serial.println("Zone2 AUTO -> Valve2 OFF");
+      Serial.println("Valve1 AUTO -> OFF");
     }
   }
 }
