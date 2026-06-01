@@ -1,0 +1,112 @@
+{
+  "name": "01-Blynk-SoilMoisture-V2-to-JSON",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "d835e186-df93-4240-a2db-d84d4f80878c",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1648,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        }
+      },
+      "id": "6ad4a307-1eb3-4417-ad89-5f78740c568c",
+      "name": "Cron (ทุก 1 นาที)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        -1648,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://167.71.221.155:8080/4gP_f0gIe4v4Wgqw61JlSExxo_u0ym-Y/get/V2",
+        "options": {
+          "response": {}
+        }
+      },
+      "id": "dcb722d9-f9e0-4016-8155-12d5c5bcb84e",
+      "name": "HTTP get Soil V2 from Blynk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1040,
+        -384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nlet rawValue;\n\nif (typeof input === \"string\") {\n  rawValue = input;\n} \nelse if (Array.isArray(input)) {\n  rawValue = input[0];\n} \nelse if (typeof input.body === \"string\") {\n  rawValue = input.body;\n} \nelse if (Array.isArray(input.body)) {\n  rawValue = input.body[0];\n} \nelse if (typeof input.data === \"string\") {\n  rawValue = input.data;\n} \nelse {\n  const values = Object.values(input);\n\n  // กรณี n8n แยก string เป็น key 0,1,2,3 เช่น 2 9 . 0 0\n  if (values.every(v => typeof v === \"string\" && v.length === 1)) {\n    rawValue = values.join(\"\");\n  } else {\n    rawValue = values[0];\n  }\n}\n\n// แปลงค่าเป็นตัวเลข\nconst soilMoistureRaw = Number(rawValue);\n\n// กำหนดจำนวนทศนิยม\nconst decimalPlaces = 1;\n\n// ปัดค่าความชื้นดินให้มีทศนิยม 1 ตำแหน่ง\nconst soilMoisture = Number(soilMoistureRaw.toFixed(decimalPlaces));\n\nreturn [\n  {\n    json: {\n      site_id: \"site01\",\n      device_id: \"esp32_smartfarm_01\",\n\n      sensor_type: \"soil_moisture\",\n      sensor_name: \"soil_moisture_slave_1\",\n\n      modbus_slave_id: 1,\n      slave_id: 1,\n\n      virtual_pin: \"V2\",\n\n      soil_moisture: soilMoisture,\n      value: soilMoisture,\n      unit: \"%\",\n\n      soil_moisture_display: soilMoisture.toFixed(decimalPlaces) + \" %\",\n\n      timestamp: new Date().toISOString(),\n      raw_value: rawValue\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -704,
+        -384
+      ],
+      "id": "d640fd37-ff87-4072-8bd2-172be6f1b1e8",
+      "name": "Format Soil Moisture JSON"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "HTTP get Soil V2 from Blynk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron (ทุก 1 นาที)": {
+      "main": [
+        [
+          {
+            "node": "HTTP get Soil V2 from Blynk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP get Soil V2 from Blynk": {
+      "main": [
+        [
+          {
+            "node": "Format Soil Moisture JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "78a58d80-e192-4f41-a44c-32de955cc9e6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3241a64d3a21999a23ad049838452b84daac628d5c9d4719f106cd55647569d3"
+  },
+  "id": "jaaV9ds2wcs6rFSz",
+  "tags": []
+}
