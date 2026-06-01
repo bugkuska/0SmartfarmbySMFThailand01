@@ -325,19 +325,21 @@ BLYNK_CONNECTED() {
 
   digitalWrite(BLYNK_LED_PIN, LED_ON);
 
-  // Sync ค่าจาก App
+  // Sync เฉพาะค่าตั้งค่าเท่านั้น
+  // Auto Mode และ Threshold สามารถดึงจาก App ได้
   Blynk.syncVirtual(VPIN_AUTO1);
   Blynk.syncVirtual(VPIN_THRESHOLD1);
 
-  if (!isAutoMode1) {
-    Blynk.syncVirtual(VPIN_VALVE1);
-  }
+  // ห้าม sync ปุ่ม Relay Manual จาก App หลัง reconnect
+  // เพราะอาจดึงค่าสถานะเก่าจาก Server มาทับสถานะจริงของ Relay
+  // Blynk.syncVirtual(VPIN_VALVE1);
+  // Blynk.syncVirtual(VPIN_VALVE2);
 
-  Blynk.syncVirtual(VPIN_VALVE2);
+  // ให้รอให้ syncVirtual ของ Auto/Threshold ทำงานก่อน
+  // แล้วค่อยส่งสถานะจริงของ Relay กลับไปที่ App
+  timer.setTimeout(1000L, syncAllToBlynk);
 
-  syncAllToBlynk();
-
-  // ไม่อ่าน Modbus ตรงนี้ เพื่อป้องกัน callback block
+  // ไม่อ่าน Modbus ตรงนี้ ให้หน่วงไปอ่านทีหลัง
   timer.setTimeout(2000L, readSoilSensor);
 }
 
@@ -364,11 +366,16 @@ BLYNK_WRITE(VPIN_VALVE1) {
   if (!isAutoMode1) {
     digitalWrite(RELAY_CH1, state ? RELAY_ON : RELAY_OFF);
 
+    int actualState = digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0;
+    safeBlynkVirtualWrite(VPIN_VALVE1, actualState);
+
     Serial.print("Valve1 Manual = ");
-    Serial.println(state ? "ON" : "OFF");
+    Serial.println(actualState ? "ON" : "OFF");
   } else {
     Serial.println("Valve1 is in AUTO mode, manual command ignored.");
-    safeBlynkVirtualWrite(VPIN_VALVE1, digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0);
+
+    int actualState = digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0;
+    safeBlynkVirtualWrite(VPIN_VALVE1, actualState);
   }
 }
 
@@ -380,8 +387,11 @@ BLYNK_WRITE(VPIN_VALVE2) {
 
   digitalWrite(RELAY_CH2, state ? RELAY_ON : RELAY_OFF);
 
+  int actualState = digitalRead(RELAY_CH2) == RELAY_ON ? 1 : 0;
+  safeBlynkVirtualWrite(VPIN_VALVE2, actualState);
+
   Serial.print("Valve2 Manual Only = ");
-  Serial.println(state ? "ON" : "OFF");
+  Serial.println(actualState ? "ON" : "OFF");
 }
 
 // =========================
