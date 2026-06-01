@@ -5,6 +5,11 @@
 #include <Preferences.h>
 
 // =========================
+// Debug
+// =========================
+#define BLYNK_PRINT Serial
+
+// =========================
 // WiFi Setting
 // =========================
 const char ssid[] = "แก้ชื่อ Wi-Fi";
@@ -18,7 +23,7 @@ const char auth[] = "PASTE_YOUR_TOKEN_HERE";  //Token จาก app blynk
 // =========================
 // Blynk Legacy Server
 // =========================
-const char blynk_server[] = "blynk-local-server-ip ที่ส่งให้ในเมล์";
+const char blynk_server[] = "blynk-local-server-ip";
 const int  blynk_port = 8080;
 
 // =========================
@@ -44,14 +49,27 @@ const int  blynk_port = 8080;
 // =========================
 // Blynk Virtual Pins
 // =========================
-// Valve1 / Soil Sensor
 #define VPIN_VALVE1      V1
 #define VPIN_SOIL1       V2
 #define VPIN_AUTO1       V3
 #define VPIN_THRESHOLD1  V4
-
-// Valve2 Manual Only
 #define VPIN_VALVE2      V5
+
+// =========================
+// Production Timing
+// =========================
+const unsigned long SENSOR_READ_INTERVAL_MS       = 15000UL;
+const unsigned long CONNECTION_CHECK_INTERVAL_MS  = 3000UL;
+const unsigned long WIFI_RECONNECT_INTERVAL_MS    = 10000UL;
+const unsigned long BLYNK_RECONNECT_INTERVAL_MS   = 10000UL;
+const unsigned long BLYNK_CONNECT_TIMEOUT_MS      = 2000UL;
+const unsigned long MAX_OFFLINE_TIME_MS           = 10UL * 60UL * 1000UL; // 10 นาที
+
+// =========================
+// Sensor / Control Setting
+// =========================
+const float SOIL_HYSTERESIS = 1.0;   // กันรีเลย์ตัดต่อถี่ เช่น threshold 50 ปิดเมื่อ >= 51
+const uint8_t MAX_SENSOR_FAILS_BEFORE_SAFE_OFF = 3;
 
 // =========================
 // Global Objects
@@ -67,11 +85,19 @@ bool  isAutoMode1 = false;
 float soilThreshold1 = 50.0;
 float soilMoisture1 = 0.0;
 
+uint8_t sensorFailCount = 0;
+
+unsigned long offlineSince = 0;
+unsigned long lastWiFiReconnectAttempt = 0;
+unsigned long lastBlynkReconnectAttempt = 0;
+
+uint8_t wifiReconnectCount = 0;
+
 // =========================
 // Function Prototypes
 // =========================
-void connectWiFi();
-void checkConnections();
+void startWiFi();
+void connectionManager();
 
 void readSoilSensor();
 bool readSoilBySlave(uint8_t slaveId, float &value);
@@ -79,59 +105,84 @@ bool readSoilBySlave(uint8_t slaveId, float &value);
 void controlValve1Auto();
 void syncAllToBlynk();
 
+void safeValve1Off();
+void safeBlynkVirtualWrite(uint8_t vpin, int value);
+void safeBlynkVirtualWriteFloat(uint8_t vpin, float value);
+
+bool isWiFiOK();
+bool isBlynkOK();
+
 void printModbusError(uint8_t errorCode);
 
 // =========================
 // Setup
 // =========================
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   delay(1000);
 
   Serial.println();
   Serial.println("====================================");
   Serial.println("ESP32 Dev Module Smart Farm");
+  Serial.println("Production Stable Version");
   Serial.println("1 Soil Sensor + Relay 2CH Active Low");
   Serial.println("CH1 GPIO18 = Valve1 Auto/Manual");
   Serial.println("CH2 GPIO19 = Valve2 Manual Only");
   Serial.println("GPIO2 Active High = Blynk Indicator");
   Serial.println("====================================");
 
-  // Serial2 for Modbus RTU
-  Serial2.begin(9600, SERIAL_8N1, RX2_PIN, TX2_PIN);
-
+  // -------------------------
+  // Pin Initial State
+  // -------------------------
   pinMode(BLYNK_LED_PIN, OUTPUT);
   pinMode(RELAY_CH1, OUTPUT);
   pinMode(RELAY_CH2, OUTPUT);
 
-  // ปิดทั้งหมดตอนเริ่มต้น
   digitalWrite(BLYNK_LED_PIN, LED_OFF);
   digitalWrite(RELAY_CH1, RELAY_OFF);
   digitalWrite(RELAY_CH2, RELAY_OFF);
 
+  // -------------------------
+  // Serial2 for Modbus RTU
+  // -------------------------
+  Serial2.begin(9600, SERIAL_8N1, RX2_PIN, TX2_PIN);
+  node.begin(1, Serial2);
+
+  // -------------------------
   // Preferences
+  // -------------------------
   preferences.begin("sensor_data", false);
 
   isAutoMode1    = preferences.getBool("auto1", false);
   soilThreshold1 = preferences.getFloat("th1", 50.0);
-  soilMoisture1  = preferences.getFloat("soil1", 0.0);
+
+  // ไม่โหลดค่า soil เก่ามาควบคุมวาล์ว เพื่อความปลอดภัย
+  soilMoisture1 = 0.0;
 
   Serial.println("=== Loaded Preferences ===");
-  Serial.printf("Valve1 -> Auto:%d Threshold:%.1f Soil:%.1f\n",
-                isAutoMode1, soilThreshold1, soilMoisture1);
+  Serial.printf("Valve1 -> Auto:%d Threshold:%.1f\n", isAutoMode1, soilThreshold1);
 
-  // Connect WiFi
-  connectWiFi();
+  // -------------------------
+  // WiFi Stable Setting
+  // -------------------------
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
 
+  startWiFi();
+
+  // -------------------------
   // Blynk Legacy
+  // -------------------------
   Blynk.config(auth, blynk_server, blynk_port);
 
-  if (WiFi.status() == WL_CONNECTED) {
+  if (isWiFiOK()) {
     Serial.println("Connecting to Blynk...");
-    Blynk.connect(5000);
+    Blynk.connect(BLYNK_CONNECT_TIMEOUT_MS);
   }
 
-  if (Blynk.connected()) {
+  if (isBlynkOK()) {
     digitalWrite(BLYNK_LED_PIN, LED_ON);
     Serial.println("Blynk connected.");
   } else {
@@ -139,42 +190,130 @@ void setup() {
     Serial.println("Blynk not connected.");
   }
 
-  // Modbus Soil Sensor Slave ID 1
-  node.begin(1, Serial2);
+  // -------------------------
+  // Timers
+  // -------------------------
+  timer.setInterval(CONNECTION_CHECK_INTERVAL_MS, connectionManager);
+  timer.setInterval(SENSOR_READ_INTERVAL_MS, readSoilSensor);
 
-  timer.setInterval(10000L, checkConnections);
-  timer.setInterval(15000L, readSoilSensor);
-
-  // อ่านค่าเร็วหลังบูต
+  // อ่านค่า sensor หลัง boot ไม่อ่านทันที
   timer.setTimeout(3000L, readSoilSensor);
+
+  Serial.println("Setup completed.");
 }
 
 // =========================
-// Connect WiFi
+// Start WiFi
 // =========================
-void connectWiFi() {
+void startWiFi() {
   Serial.println();
-  Serial.print("Connecting to WiFi: ");
+  Serial.print("Starting WiFi: ");
   Serial.println(ssid);
 
-  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, pass);
 
   unsigned long startAttemptTime = millis();
 
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
-    delay(500);
-    Serial.print(".");
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000UL) {
+    delay(100);
+    yield();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
     Serial.println("WiFi connected!");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
+    Serial.print("RSSI: ");
+    Serial.println(WiFi.RSSI());
   } else {
-    Serial.println();
-    Serial.println("WiFi connection failed!");
+    Serial.println("WiFi initial connection failed. System will retry automatically.");
+  }
+}
+
+// =========================
+// Connection Manager
+// =========================
+void connectionManager() {
+  bool wifiOK = isWiFiOK();
+  bool blynkOK = isBlynkOK();
+
+  // -------------------------
+  // Connection OK
+  // -------------------------
+  if (wifiOK && blynkOK) {
+    offlineSince = 0;
+    digitalWrite(BLYNK_LED_PIN, LED_ON);
+    return;
+  }
+
+  // -------------------------
+  // Connection Problem
+  // -------------------------
+  digitalWrite(BLYNK_LED_PIN, LED_OFF);
+
+  if (offlineSince == 0) {
+    offlineSince = millis();
+  }
+
+  Serial.print("Connection status -> WiFi: ");
+  Serial.print(wifiOK ? "OK" : "FAIL");
+  Serial.print(" | Blynk: ");
+  Serial.println(blynkOK ? "OK" : "FAIL");
+
+  // -------------------------
+  // Fail-safe Restart
+  // -------------------------
+  if (millis() - offlineSince > MAX_OFFLINE_TIME_MS) {
+    Serial.println("Offline too long. Restarting ESP32 for recovery...");
+    delay(1000);
+    ESP.restart();
+  }
+
+  // -------------------------
+  // WiFi Reconnect
+  // -------------------------
+  if (!wifiOK) {
+    if (millis() - lastWiFiReconnectAttempt >= WIFI_RECONNECT_INTERVAL_MS) {
+      lastWiFiReconnectAttempt = millis();
+      wifiReconnectCount++;
+
+      Serial.print("Trying WiFi reconnect... attempt ");
+      Serial.println(wifiReconnectCount);
+
+      // ทุก 6 รอบ ให้เริ่ม WiFi ใหม่แบบหนักขึ้น
+      if (wifiReconnectCount % 6 == 0) {
+        Serial.println("Hard WiFi reconnect...");
+        WiFi.disconnect(false);
+        delay(100);
+        WiFi.begin(ssid, pass);
+      } else {
+        WiFi.reconnect();
+      }
+    }
+
+    return;
+  }
+
+  // ถ้า WiFi กลับมาแล้ว reset count
+  wifiReconnectCount = 0;
+
+  // -------------------------
+  // Blynk Reconnect
+  // -------------------------
+  if (wifiOK && !blynkOK) {
+    if (millis() - lastBlynkReconnectAttempt >= BLYNK_RECONNECT_INTERVAL_MS) {
+      lastBlynkReconnectAttempt = millis();
+
+      Serial.println("Trying Blynk reconnect...");
+
+      if (Blynk.connect(BLYNK_CONNECT_TIMEOUT_MS)) {
+        Serial.println("Blynk reconnected.");
+        digitalWrite(BLYNK_LED_PIN, LED_ON);
+      } else {
+        Serial.println("Blynk reconnect failed.");
+        digitalWrite(BLYNK_LED_PIN, LED_OFF);
+      }
+    }
   }
 }
 
@@ -186,28 +325,29 @@ BLYNK_CONNECTED() {
 
   digitalWrite(BLYNK_LED_PIN, LED_ON);
 
-  // Sync Valve1 Auto/Threshold
-  Blynk.syncVirtual(VPIN_AUTO1, VPIN_THRESHOLD1);
+  // Sync ค่าจาก App
+  Blynk.syncVirtual(VPIN_AUTO1);
+  Blynk.syncVirtual(VPIN_THRESHOLD1);
 
-  // ถ้า Valve1 ไม่ได้อยู่ Auto ให้ Sync ปุ่ม Manual
   if (!isAutoMode1) {
     Blynk.syncVirtual(VPIN_VALVE1);
   }
 
-  // Valve2 เป็น Manual อย่างเดียว
   Blynk.syncVirtual(VPIN_VALVE2);
 
   syncAllToBlynk();
 
-  // อ่าน sensor ใหม่ทันทีหลัง Blynk Connect
-  readSoilSensor();
+  // ไม่อ่าน Modbus ตรงนี้ เพื่อป้องกัน callback block
+  timer.setTimeout(2000L, readSoilSensor);
 }
 
 // =========================
 // Sync All Widgets
 // =========================
 void syncAllToBlynk() {
-  Blynk.virtualWrite(VPIN_AUTO1, isAutoMode1);
+  if (!isBlynkOK()) return;
+
+  Blynk.virtualWrite(VPIN_AUTO1, isAutoMode1 ? 1 : 0);
   Blynk.virtualWrite(VPIN_THRESHOLD1, soilThreshold1);
   Blynk.virtualWrite(VPIN_SOIL1, soilMoisture1);
 
@@ -216,67 +356,19 @@ void syncAllToBlynk() {
 }
 
 // =========================
-// Check Connections
-// =========================
-void checkConnections() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected! Reconnecting...");
-    digitalWrite(BLYNK_LED_PIN, LED_OFF);
-
-    WiFi.disconnect();
-    WiFi.begin(ssid, pass);
-
-    unsigned long startAttemptTime = millis();
-
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 5000) {
-      delay(500);
-      Serial.print(".");
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println();
-      Serial.println("WiFi reconnected!");
-      Serial.print("IP Address: ");
-      Serial.println(WiFi.localIP());
-    } else {
-      Serial.println();
-      Serial.println("WiFi reconnect failed.");
-      return;
-    }
-  }
-
-  if (!Blynk.connected()) {
-    Serial.println("Blynk disconnected! Reconnecting...");
-    digitalWrite(BLYNK_LED_PIN, LED_OFF);
-
-    Blynk.connect(5000);
-
-    if (Blynk.connected()) {
-      Serial.println("Blynk reconnected!");
-      digitalWrite(BLYNK_LED_PIN, LED_ON);
-    } else {
-      Serial.println("Blynk reconnect failed.");
-      digitalWrite(BLYNK_LED_PIN, LED_OFF);
-    }
-  } else {
-    digitalWrite(BLYNK_LED_PIN, LED_ON);
-  }
-}
-
-// =========================
 // Valve1 Manual Control
 // =========================
 BLYNK_WRITE(VPIN_VALVE1) {
-  if (!isAutoMode1) {
-    int state = param.asInt();
+  int state = param.asInt();
 
+  if (!isAutoMode1) {
     digitalWrite(RELAY_CH1, state ? RELAY_ON : RELAY_OFF);
 
     Serial.print("Valve1 Manual = ");
     Serial.println(state ? "ON" : "OFF");
   } else {
     Serial.println("Valve1 is in AUTO mode, manual command ignored.");
-    Blynk.virtualWrite(VPIN_VALVE1, digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0);
+    safeBlynkVirtualWrite(VPIN_VALVE1, digitalRead(RELAY_CH1) == RELAY_ON ? 1 : 0);
   }
 }
 
@@ -296,24 +388,39 @@ BLYNK_WRITE(VPIN_VALVE2) {
 // Valve1 Auto Mode
 // =========================
 BLYNK_WRITE(VPIN_AUTO1) {
-  isAutoMode1 = param.asInt();
-  preferences.putBool("auto1", isAutoMode1);
+  bool newMode = param.asInt();
+
+  if (newMode != isAutoMode1) {
+    isAutoMode1 = newMode;
+    preferences.putBool("auto1", isAutoMode1);
+  }
 
   Serial.print("Valve1 Mode = ");
   Serial.println(isAutoMode1 ? "Auto" : "Manual");
 
   if (!isAutoMode1) {
     // ออกจาก Auto แล้วปิด Valve1 ก่อน เพื่อความปลอดภัย
-    digitalWrite(RELAY_CH1, RELAY_OFF);
-    Blynk.virtualWrite(VPIN_VALVE1, 0);
+    safeValve1Off();
+    safeBlynkVirtualWrite(VPIN_VALVE1, 0);
   } else {
     controlValve1Auto();
   }
 }
 
+// =========================
+// Threshold Setting
+// =========================
 BLYNK_WRITE(VPIN_THRESHOLD1) {
-  soilThreshold1 = param.asFloat();
-  preferences.putFloat("th1", soilThreshold1);
+  float newThreshold = param.asFloat();
+
+  // จำกัดช่วงค่าที่เหมาะสม
+  if (newThreshold < 0.0) newThreshold = 0.0;
+  if (newThreshold > 100.0) newThreshold = 100.0;
+
+  if (abs(newThreshold - soilThreshold1) >= 0.1) {
+    soilThreshold1 = newThreshold;
+    preferences.putFloat("th1", soilThreshold1);
+  }
 
   Serial.print("Valve1 Soil Threshold = ");
   Serial.println(soilThreshold1);
@@ -333,10 +440,12 @@ void readSoilSensor() {
   float newValue = 0.0;
 
   if (readSoilBySlave(1, newValue)) {
-    soilMoisture1 = newValue;
-    preferences.putFloat("soil1", soilMoisture1);
+    sensorFailCount = 0;
 
-    Blynk.virtualWrite(VPIN_SOIL1, soilMoisture1);
+    soilMoisture1 = newValue;
+
+    // ไม่เขียน Preferences ทุกครั้ง เพราะจะทำให้ Flash/NVS เสื่อมและหน่วงระบบ
+    safeBlynkVirtualWriteFloat(VPIN_SOIL1, soilMoisture1);
 
     Serial.print("Soil Moisture = ");
     Serial.print(soilMoisture1, 1);
@@ -344,7 +453,17 @@ void readSoilSensor() {
 
     controlValve1Auto();
   } else {
-    Serial.println("Soil Sensor read failed!");
+    sensorFailCount++;
+
+    Serial.print("Soil Sensor read failed! Fail count = ");
+    Serial.println(sensorFailCount);
+
+    // Fail-safe: ถ้า Auto อยู่ แล้วอ่าน sensor ไม่ได้หลายครั้ง ให้ปิดวาล์วกันน้ำไหลค้าง
+    if (isAutoMode1 && sensorFailCount >= MAX_SENSOR_FAILS_BEFORE_SAFE_OFF) {
+      Serial.println("Sensor failed repeatedly. Valve1 AUTO safe OFF.");
+      safeValve1Off();
+      safeBlynkVirtualWrite(VPIN_VALVE1, 0);
+    }
   }
 
   Serial.println("====================================");
@@ -406,22 +525,72 @@ bool readSoilBySlave(uint8_t slaveId, float &value) {
 // Valve1 Auto Control
 // =========================
 void controlValve1Auto() {
-  if (isAutoMode1) {
-    Serial.print("Valve1 AUTO Check -> Soil = ");
-    Serial.print(soilMoisture1);
-    Serial.print(" Threshold = ");
-    Serial.println(soilThreshold1);
+  if (!isAutoMode1) return;
 
-    if (soilMoisture1 < soilThreshold1) {
-      digitalWrite(RELAY_CH1, RELAY_ON);
-      Blynk.virtualWrite(VPIN_VALVE1, 1);
-      Serial.println("Valve1 AUTO -> ON");
-    } else {
-      digitalWrite(RELAY_CH1, RELAY_OFF);
-      Blynk.virtualWrite(VPIN_VALVE1, 0);
-      Serial.println("Valve1 AUTO -> OFF");
-    }
+  bool valveCurrentlyOn = (digitalRead(RELAY_CH1) == RELAY_ON);
+  bool targetValveState = valveCurrentlyOn;
+
+  Serial.print("Valve1 AUTO Check -> Soil = ");
+  Serial.print(soilMoisture1, 1);
+  Serial.print(" Threshold = ");
+  Serial.print(soilThreshold1, 1);
+  Serial.print(" Hysteresis = ");
+  Serial.println(SOIL_HYSTERESIS, 1);
+
+  // เปิดเมื่อความชื้นต่ำกว่า threshold
+  if (soilMoisture1 < soilThreshold1) {
+    targetValveState = true;
   }
+
+  // ปิดเมื่อความชื้นสูงกว่า threshold + hysteresis
+  if (soilMoisture1 >= soilThreshold1 + SOIL_HYSTERESIS) {
+    targetValveState = false;
+  }
+
+  if (targetValveState != valveCurrentlyOn) {
+    digitalWrite(RELAY_CH1, targetValveState ? RELAY_ON : RELAY_OFF);
+    safeBlynkVirtualWrite(VPIN_VALVE1, targetValveState ? 1 : 0);
+
+    Serial.print("Valve1 AUTO -> ");
+    Serial.println(targetValveState ? "ON" : "OFF");
+  } else {
+    Serial.print("Valve1 AUTO -> KEEP ");
+    Serial.println(valveCurrentlyOn ? "ON" : "OFF");
+  }
+}
+
+// =========================
+// Safe Valve OFF
+// =========================
+void safeValve1Off() {
+  digitalWrite(RELAY_CH1, RELAY_OFF);
+  Serial.println("Valve1 -> SAFE OFF");
+}
+
+// =========================
+// Safe Blynk Write
+// =========================
+void safeBlynkVirtualWrite(uint8_t vpin, int value) {
+  if (isBlynkOK()) {
+    Blynk.virtualWrite(vpin, value);
+  }
+}
+
+void safeBlynkVirtualWriteFloat(uint8_t vpin, float value) {
+  if (isBlynkOK()) {
+    Blynk.virtualWrite(vpin, value);
+  }
+}
+
+// =========================
+// Connection Helpers
+// =========================
+bool isWiFiOK() {
+  return WiFi.status() == WL_CONNECTED;
+}
+
+bool isBlynkOK() {
+  return isWiFiOK() && Blynk.connected();
 }
 
 // =========================
@@ -471,9 +640,10 @@ void printModbusError(uint8_t errorCode) {
 // Loop
 // =========================
 void loop() {
-  if (Blynk.connected()) {
+  if (isBlynkOK()) {
     Blynk.run();
   }
 
   timer.run();
+  yield();
 }
