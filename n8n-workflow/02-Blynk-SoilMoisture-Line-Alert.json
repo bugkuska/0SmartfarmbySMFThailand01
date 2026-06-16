@@ -1,0 +1,276 @@
+{
+  "name": "02-Blynk-SoilMoisture-Line-Alert",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a2bb9302-a9f7-4bec-8c0a-07efe932cd87",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1376,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        }
+      },
+      "id": "87d73ac5-92c0-4778-a842-a7786611bc82",
+      "name": "Cron (ทุก 1 นาที)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        -1376,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.message }}"
+      },
+      "type": "n8n-nodes-linewebhook.LineMessageNode",
+      "typeVersion": 1,
+      "position": [
+        224,
+        0
+      ],
+      "id": "750455f2-91a9-44e5-be35-4d231bf006b6",
+      "name": "LineMessageNode"
+    },
+    {
+      "parameters": {
+        "message": "={{ $json.message }}",
+        "replyToken": "=",
+        "targetRecipient": "={{ $('Set (LINE Target)').item.json.toId }}"
+      },
+      "type": "n8n-nodes-linewebhook.LineMessaging",
+      "typeVersion": 1,
+      "position": [
+        448,
+        0
+      ],
+      "id": "d7c43923-8b44-4f3d-96b1-77c26aaa5e8a",
+      "name": "LineMessaging-SendMessage",
+      "credentials": {
+        "lineMessagingAuthApi": {
+          "id": "8DphaWow38ENbUaZ",
+          "name": "Line Messaging Auth-xn8nsmartfarm"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const BLYNK_BASE = \"http://IP-Address:Port\";\nconst BLYNK_TOKEN = \"Replace_Your_Blynk_Token_Here\";\n\nconst pins = [\n  {\n    key: \"valve1\",\n    virtual_pin: \"V1\",\n    label: \"Valve 1\",\n    unit: \"\"\n  },\n  {\n    key: \"soil\",\n    virtual_pin: \"V2\",\n    label: \"Soil Moisture\",\n    unit: \"%\"\n  },\n  {\n    key: \"auto_mode\",\n    virtual_pin: \"V3\",\n    label: \"Auto Manual Mode\",\n    unit: \"\"\n  },\n  {\n    key: \"slider_threshold\",\n    virtual_pin: \"V4\",\n    label: \"Soil Moisture Slider Threshold\",\n    unit: \"%\"\n  }\n];\n\nreturn pins.map(pin => {\n  return {\n    json: {\n      ...pin,\n      url: `${BLYNK_BASE}/${BLYNK_TOKEN}/get/${pin.virtual_pin}`\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1056,
+        160
+      ],
+      "id": "ea61e302-4f60-4d10-a43b-0b9f143b5fc4",
+      "name": "Prepare Blynk Pin List"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {}
+        }
+      },
+      "id": "8842f21d-9ea8-4a1b-bd64-944d1b9cdcd3",
+      "name": "HTTP get Blynk Values",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -816,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function extractBlynkValue(input) {\n  let rawValue;\n\n  if (typeof input === \"string\") {\n    rawValue = input;\n  } \n  else if (typeof input === \"number\") {\n    rawValue = input;\n  }\n  else if (Array.isArray(input)) {\n    rawValue = input[0];\n  } \n  else if (typeof input.body === \"string\") {\n    rawValue = input.body;\n  } \n  else if (Array.isArray(input.body)) {\n    rawValue = input.body[0];\n  } \n  else if (typeof input.data === \"string\") {\n    rawValue = input.data;\n  } \n  else if (Array.isArray(input.data)) {\n    rawValue = input.data[0];\n  }\n  else {\n    const values = Object.values(input);\n\n    if (values.every(v => typeof v === \"string\" && v.length === 1)) {\n      rawValue = values.join(\"\");\n    } else {\n      rawValue = values[0];\n    }\n  }\n\n  return rawValue;\n}\n\nfunction toBool(value) {\n  return [\"1\", \"true\", \"on\", \"auto\", \"AUTO\"].includes(String(value).trim());\n}\n\n// ===============================\n// 1) ดึงข้อมูลจาก Blynk V1-V4\n// ===============================\nconst pinItems = $(\"Prepare Blynk Pin List\").all();\nconst responseItems = $input.all();\n\nconst raw = {};\n\nfor (let i = 0; i < responseItems.length; i++) {\n  const key = pinItems[i].json.key;\n  const response = responseItems[i].json;\n  raw[key] = extractBlynkValue(response);\n}\n\n// ===============================\n// 2) แปลงค่าข้อมูล\n// ===============================\nconst valve1 = toBool(raw.valve1);\nconst valve1Status = valve1 ? \"ON\" : \"OFF\";\n\nconst autoMode = toBool(raw.auto_mode);\nconst autoModeText = autoMode ? \"Auto\" : \"Manual\";\n\nconst soilRaw = Number(raw.soil);\nconst thresholdRaw = Number(raw.slider_threshold);\n\nconst soilMoisture = Number.isFinite(soilRaw)\n  ? Number(soilRaw.toFixed(1))\n  : null;\n\nconst sliderThreshold = Number.isFinite(thresholdRaw)\n  ? Number(thresholdRaw.toFixed(1))\n  : null;\n\n// ===============================\n// 3) ตั้งค่า Alert Policy\n// ===============================\nconst cooldownMinutes = 15;   // เปลี่ยนเป็น 30 ได้ถ้าต้องการแจ้งซ้ำทุก 30 นาที\nconst hysteresis = 1.0;       // ค่ากลับสู่ปกติต้อง >= Slider + 1.0 เพื่อกันแจ้งเตือนสลับไปมา\n\nconst now = new Date();\nconst nowMs = Date.now();\n\nconst thaiTime = now.toLocaleString(\"th-TH\", {\n  timeZone: \"Asia/Bangkok\",\n  year: \"numeric\",\n  month: \"2-digit\",\n  day: \"2-digit\",\n  hour: \"2-digit\",\n  minute: \"2-digit\",\n  second: \"2-digit\"\n});\n\nconst siteId = \"site01\";\nconst deviceId = \"esp32_smartfarm_01\";\nconst slaveId = 1;\n\n// ใช้จำสถานะข้ามรอบการทำงานของ Workflow\nconst staticData = $getWorkflowStaticData(\"global\");\nconst alertKey = `${siteId}_${deviceId}_soil_slave_${slaveId}`;\n\nconst lastAlertAt = staticData[`lastAlertAt_${alertKey}`] || 0;\nconst wasInAlert = staticData[`wasInAlert_${alertKey}`] || false;\n\n// ===============================\n// 4) ตรวจสอบเงื่อนไข\n// ===============================\nconst isLowSoil =\n  autoMode === true &&\n  soilMoisture !== null &&\n  sliderThreshold !== null &&\n  soilMoisture < sliderThreshold;\n\nconst isRecovered =\n  autoMode === true &&\n  wasInAlert === true &&\n  soilMoisture !== null &&\n  sliderThreshold !== null &&\n  soilMoisture >= sliderThreshold + hysteresis;\n\nlet shouldSendLine = false;\nlet eventStatus = \"normal\";\nlet lineMessage = \"\";\n\n// ===============================\n// 5) กรณีความชื้นต่ำ\n// ===============================\nif (isLowSoil) {\n  const cooldownPassed =\n    !lastAlertAt || (nowMs - lastAlertAt) >= cooldownMinutes * 60 * 1000;\n\n  if (!wasInAlert) {\n    // แจ้งเตือนครั้งแรกทันที\n    shouldSendLine = true;\n    eventStatus = \"low_soil_moisture_first_alert\";\n\n    staticData[`lastAlertAt_${alertKey}`] = nowMs;\n    staticData[`wasInAlert_${alertKey}`] = true;\n  } \n  else if (cooldownPassed) {\n    // แจ้งซ้ำเมื่อยังต่ำอยู่ และครบเวลา Cooldown แล้ว\n    shouldSendLine = true;\n    eventStatus = \"low_soil_moisture_repeat_alert\";\n\n    staticData[`lastAlertAt_${alertKey}`] = nowMs;\n    staticData[`wasInAlert_${alertKey}`] = true;\n  } \n  else {\n    // ยังต่ำอยู่ แต่ยังไม่ครบเวลาแจ้งซ้ำ\n    shouldSendLine = false;\n    eventStatus = \"low_soil_moisture_waiting_cooldown\";\n\n    staticData[`wasInAlert_${alertKey}`] = true;\n  }\n\n  if (shouldSendLine) {\n    lineMessage =\n`⚠️ แจ้งเตือนความชื้นในดินต่ำ\n\nพื้นที่: ${siteId}\nอุปกรณ์: ${deviceId}\nเซนเซอร์: Soil Moisture Slave ID ${slaveId}\n\nค่าความชื้นปัจจุบัน: ${soilMoisture.toFixed(1)} %\nค่าที่ตั้งไว้บน Slider: ${sliderThreshold.toFixed(1)} %\n\nสถานะโหมด: ${autoModeText}\nสถานะวาล์ว 1: ${valve1Status}\n\nคำแนะนำ: ค่าความชื้นต่ำกว่าที่กำหนดไว้ ควรตรวจสอบการทำงานของวาล์วหรือระบบให้น้ำ\n\nเวลา: ${thaiTime}`;\n  }\n}\n\n// ===============================\n// 6) กรณีค่ากลับมาปกติ\n// ===============================\nelse if (isRecovered) {\n  shouldSendLine = true;\n  eventStatus = \"recovered\";\n\n  staticData[`wasInAlert_${alertKey}`] = false;\n  staticData[`lastAlertAt_${alertKey}`] = 0;\n\n  lineMessage =\n`✅ ความชื้นในดินกลับสู่ระดับปกติ\n\nพื้นที่: ${siteId}\nอุปกรณ์: ${deviceId}\nเซนเซอร์: Soil Moisture Slave ID ${slaveId}\n\nค่าความชื้นปัจจุบัน: ${soilMoisture.toFixed(1)} %\nค่าที่ตั้งไว้บน Slider: ${sliderThreshold.toFixed(1)} %\n\nสถานะโหมด: ${autoModeText}\nสถานะวาล์ว 1: ${valve1Status}\n\nสถานะ: ค่าความชื้นกลับเข้าสู่ระดับปกติแล้ว\n\nเวลา: ${thaiTime}`;\n}\n\n// ===============================\n// 7) กรณีปกติ\n// ===============================\nelse {\n  shouldSendLine = false;\n\n  if (!autoMode) {\n    eventStatus = \"manual_mode\";\n  } else {\n    eventStatus = \"normal\";\n  }\n\n  // ถ้า Auto Mode เปิดอยู่ และค่าอยู่ในเกณฑ์ปกติ ให้ reset alert state\n  if (autoMode && soilMoisture !== null && sliderThreshold !== null && soilMoisture >= sliderThreshold + hysteresis) {\n    staticData[`wasInAlert_${alertKey}`] = false;\n    staticData[`lastAlertAt_${alertKey}`] = 0;\n  }\n}\n\n// ===============================\n// 8) ส่งออกข้อมูล\n// ===============================\nreturn [\n  {\n    json: {\n      site_id: siteId,\n      device_id: deviceId,\n\n      sensor_type: \"soil_moisture\",\n      sensor_name: \"soil_moisture_slave_1\",\n      modbus_slave_id: slaveId,\n      slave_id: slaveId,\n\n      valve1: valve1,\n      valve1_raw: raw.valve1,\n      valve1_status: valve1Status,\n      valve1_virtual_pin: \"V1\",\n\n      soil_moisture: soilMoisture,\n      soil_moisture_display: soilMoisture !== null ? soilMoisture.toFixed(1) + \" %\" : null,\n      soil_virtual_pin: \"V2\",\n\n      auto_mode: autoMode,\n      auto_mode_text: autoModeText,\n      auto_mode_raw: raw.auto_mode,\n      auto_mode_virtual_pin: \"V3\",\n\n      slider_threshold: sliderThreshold,\n      slider_threshold_display: sliderThreshold !== null ? sliderThreshold.toFixed(1) + \" %\" : null,\n      slider_virtual_pin: \"V4\",\n\n      unit: \"%\",\n\n      should_send_line: shouldSendLine,\n      event_status: eventStatus,\n      cooldown_minutes: cooldownMinutes,\n      hysteresis: hysteresis,\n\n      line_message: lineMessage,\n\n      timestamp: now.toISOString(),\n      timestamp_th: thaiTime,\n\n      raw_blynk_values: raw\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -544,
+        160
+      ],
+      "id": "4193e26f-18ae-45b5-b921-ac470d399f36",
+      "name": "Format Blynk All Values JSON"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "baf6e00d-f534-4213-aeec-e7a2bd96db7f",
+              "leftValue": "={{ $json.should_send_line }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -320,
+        160
+      ],
+      "id": "e37a180e-db3e-4cdf-bdca-8b544861f21c",
+      "name": "IF: should_send_line"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "toId",
+              "value": "=Your user ID"
+            },
+            {
+              "name": "message",
+              "value": "={{ $json.line_message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Set (LINE Target)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "74c8803d-2249-47f1-9505-80fe04fcec88",
+      "alwaysOutputData": false
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Blynk Pin List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron (ทุก 1 นาที)": {
+      "main": [
+        [
+          {
+            "node": "Prepare Blynk Pin List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LineMessageNode": {
+      "main": [
+        [
+          {
+            "node": "LineMessaging-SendMessage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Blynk Pin List": {
+      "main": [
+        [
+          {
+            "node": "HTTP get Blynk Values",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP get Blynk Values": {
+      "main": [
+        [
+          {
+            "node": "Format Blynk All Values JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Blynk All Values JSON": {
+      "main": [
+        [
+          {
+            "node": "IF: should_send_line",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set (LINE Target)": {
+      "main": [
+        [
+          {
+            "node": "LineMessageNode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: should_send_line": {
+      "main": [
+        [
+          {
+            "node": "Set (LINE Target)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "04ecdbe0-12bb-487f-b6f3-abb3a3d9babb",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d39bd5346c9c9f532a6f31d698add8ca3598f8f38db76836268bccc2bd6c7e10"
+  },
+  "nodeGroups": [],
+  "id": "e7Wcd68q1lEAv7FK",
+  "tags": []
+}
